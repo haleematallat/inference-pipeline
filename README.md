@@ -193,6 +193,18 @@ pytest -q
 Tests use a deterministic encoder and require no GPU, Redis, Triton, camera, internet access,
 or model download.
 
+The Triton tests cover gRPC request construction, startup and shutdown, invalid server output,
+few-shot predictions, and numerical parity between the PyTorch encoder and the served Python
+model. They run without starting Triton:
+
+~~~bash
+pytest -q tests/unit/test_triton_backend.py
+docker compose --profile triton config
+~~~
+
+GitHub Actions runs the full test suite and validates both the default and Triton Compose
+configurations on every push and pull request.
+
 ## Containers
 
 ~~~bash
