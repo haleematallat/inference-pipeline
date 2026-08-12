@@ -235,9 +235,16 @@ CUDA can be selected for local PyTorch inference. Triton enables server-side dyn
 but adds serialization and network latency. Benchmark preprocessing, encoder latency, batch size,
 and stream backpressure on the intended hardware.
 
-## Known limitations
+## Future improvements
 
-- The sample classes are simple colors and are not an accuracy benchmark.
-- Similarity thresholds are not calibrated automatically.
-- The included Triton model is CPU-based and demonstrates remote serving rather than GPU speedup.
-- No training workflow is included; this sample concentrates on correct, reusable inference.
+- Replace the color demonstration set with a representative image dataset and report measured
+  classification and rejection metrics.
+- Add threshold calibration against a held-out validation set instead of selecting similarity
+  thresholds manually.
+- Add a training and fine-tuning workflow that exports compatible encoder checkpoints with
+  reproducible dataset and experiment configuration.
+- Extend the Triton model repository with a GPU-backed encoder and benchmark local PyTorch and
+  remote inference under the same batch and concurrency settings.
+- Add a container-level integration test that starts Triton, runs the complete demo, and compares
+  its predictions with the local backend.
+- Add asynchronous stream processing and explicit backpressure policies for sustained workloads.
