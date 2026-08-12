@@ -5,3 +5,32 @@ services:
     command: ["vision-pipeline", "demo", "--config", "configs/demo.yaml"]
     volumes:
       - ./outputs:/app/outputs
+
+  triton:
+    image: nvcr.io/nvidia/tritonserver:24.08-py3
+    profiles: ["triton"]
+    command: ["tritonserver", "--model-repository=/models"]
+    ports:
+      - "8000:8000"
+      - "8001:8001"
+      - "8002:8002"
+    volumes:
+      - ./triton_models:/models:ro
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/v2/health/ready')"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  triton-demo:
+    profiles: ["triton"]
+    build:
+      context: .
+      args:
+        INSTALL_TARGET: ".[triton]"
+    command: ["vision-pipeline", "demo", "--config", "configs/triton.yaml"]
+    depends_on:
+      triton:
+        condition: service_healthy
+    volumes:
+      - ./outputs:/app/outputs

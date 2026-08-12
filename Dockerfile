@@ -5,10 +5,12 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
+ARG INSTALL_TARGET=.
+
 COPY pyproject.toml README.md ./
 COPY src ./src
 RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch==2.9.1+cpu && \
-    pip install --no-cache-dir .
+    pip install --no-cache-dir "${INSTALL_TARGET}"
 
 COPY configs ./configs
 COPY examples ./examples
