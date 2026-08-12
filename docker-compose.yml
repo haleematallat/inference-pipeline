@@ -1,0 +1,7 @@
+services:
+  vision-pipeline:
+    build:
+      context: .
+    command: ["vision-pipeline", "demo", "--config", "configs/demo.yaml"]
+    volumes:
+      - ./outputs:/app/outputs

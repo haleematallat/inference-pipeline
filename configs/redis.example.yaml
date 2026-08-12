@@ -1,0 +1,4 @@
+redis_url: ${REDIS_URL}
+input_queue: demo-camera-input
+output_queue: demo-camera-output
+capacity: 64

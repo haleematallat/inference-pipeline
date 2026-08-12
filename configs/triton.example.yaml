@@ -1,0 +1,3 @@
+server_url: ${INFERENCE_SERVER_URL}
+model_name: image-encoder
+model_version: "1"
