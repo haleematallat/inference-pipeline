@@ -1,0 +1,30 @@
+seed: 7
+logging_level: INFO
+
+stream:
+  type: local_file
+  input_dir: ../examples/query
+  output_path: ../outputs/triton_predictions.jsonl
+  capacity: 16
+
+runners:
+  - type: few_shot_classifier
+    name: triton-few-shot
+    backend:
+      type: triton
+      batch_size: 4
+      support_dir: ../examples/support
+      similarity_metric: cosine
+      top_k: 2
+      rejection_threshold: 0.75
+      preprocessing:
+        size: [32, 32]
+        normalize: false
+      triton:
+        server_url: triton:8001
+        model_name: image_encoder
+        model_version: "1"
+        input_name: images
+        output_name: embeddings
+        connect_timeout: 60
+        request_timeout: 10

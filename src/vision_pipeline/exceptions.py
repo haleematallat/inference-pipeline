@@ -14,5 +14,9 @@ class ModelArtifactError(VisionPipelineError):
     pass
 
 
+class InferenceError(VisionPipelineError):
+    pass
+
+
 class StreamError(VisionPipelineError):
     pass

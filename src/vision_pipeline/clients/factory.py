@@ -31,6 +31,7 @@ class InferenceBackendFactory:
         if cls._builtins_loaded:
             return
         importlib.import_module("vision_pipeline.clients.pytorch_backend")
+        importlib.import_module("vision_pipeline.clients.triton_backend")
         cls._builtins_loaded = True
 
     @classmethod

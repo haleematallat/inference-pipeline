@@ -24,6 +24,18 @@ class EncoderConfig(BaseModel):
     checkpoint: Path | None = None
 
 
+class TritonConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    server_url: str = "localhost:8001"
+    model_name: str = "image_encoder"
+    model_version: str = "1"
+    input_name: str = "images"
+    output_name: str = "embeddings"
+    connect_timeout: float = Field(default=30.0, gt=0)
+    request_timeout: float = Field(default=10.0, gt=0)
+
+
 class BackendConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -36,11 +48,14 @@ class BackendConfig(BaseModel):
     rejection_threshold: float = 0.0
     encoder: EncoderConfig = Field(default_factory=EncoderConfig)
     preprocessing: PreprocessingConfig = Field(default_factory=PreprocessingConfig)
+    triton: TritonConfig | None = None
 
     @model_validator(mode="after")
     def validate_device(self) -> BackendConfig:
         if not (self.device == "cpu" or self.device == "cuda" or self.device.startswith("cuda:")):
             raise ValueError("device must be cpu, cuda, or cuda:<index>")
+        if self.type == "triton" and self.triton is None:
+            raise ValueError("triton settings are required for the triton backend")
         return self
 
 

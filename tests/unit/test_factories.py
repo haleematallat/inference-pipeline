@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from vision_pipeline.clients.factory import InferenceBackendFactory
 from vision_pipeline.config.models import BackendConfig, RunnerConfig
 from vision_pipeline.exceptions import FactoryError
 from vision_pipeline.runners.base import IInferenceRunner
@@ -19,6 +20,11 @@ class TemporaryRunner(IInferenceRunner):
 def test_builtin_runner_is_registered():
     runner_class = InferenceRunnerFactory.get_runner("few_shot_classifier")
     assert runner_class.__name__ == "FewShotClassificationRunner"
+
+
+def test_triton_backend_is_registered():
+    backend_class = InferenceBackendFactory.get_backend("triton")
+    assert backend_class.__name__ == "TritonBackend"
 
 
 def test_custom_runner_registration():

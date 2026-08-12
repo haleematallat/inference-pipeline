@@ -25,7 +25,7 @@ dev = [
     "types-PyYAML>=6",
 ]
 redis = ["redis>=5"]
-triton = ["tritonclient[grpc]>=2.45"]
+triton = ["tritonclient[grpc]>=2.45,<3"]
 vision = ["torchvision>=0.17"]
 
 [project.scripts]
