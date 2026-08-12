@@ -206,13 +206,4 @@ and stream backpressure on the intended hardware.
 - The optional Triton configuration is an extension point, not a working default backend.
 - No training workflow is included; this sample concentrates on correct, reusable inference.
 
-## Security, privacy, and reproducibility
 
-No credentials, private endpoints, model weights, or company-specific deployment data are
-required. Keep secrets in environment variables, never commit camera URLs containing
-credentials, validate model artifacts before loading, and avoid logging URLs that may contain
-passwords.
-
-The demo fixes Python, NumPy, and PyTorch random seeds. It uses a deterministic encoder and
-tracked PPM images, so it runs without external artifacts. Applications requiring byte-for-byte
-environments should add a platform-specific lock file.
