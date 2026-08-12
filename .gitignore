@@ -1,0 +1,66 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs & data
+*.log
+logs/
+data/
+output/
+outputs/
+!outputs/.gitkeep
+*.mp4
+*.avi
+*.jpg
+*.jpeg
+*.png
+
+# Models & weights
+/models/
+/model_repository/
+*.onnx
+*.engine
+*.plan
+*.trt
+*.pt
+*.pth
+*.pb
+*.xml
+*.bin
+*.tflite
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Tests / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
