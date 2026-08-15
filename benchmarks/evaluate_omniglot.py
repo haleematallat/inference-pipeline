@@ -8,8 +8,10 @@ import random
 from collections.abc import Callable
 from functools import partial
 from statistics import mean, stdev
+from time import perf_counter
 from typing import TYPE_CHECKING
 
+import PIL
 import torch
 from PIL import Image
 
@@ -26,10 +28,30 @@ def load_dataset(root: str, download: bool) -> tuple[Omniglot, dict[int, list[in
         raise RuntimeError("Omniglot evaluation requires installation with the 'vision' extra") from error
 
     dataset = Omniglot(root=root, background=False, download=download)
-    indices_by_class = {class_index: [] for class_index in range(len(dataset._characters))}
-    for index, (_, target) in enumerate(dataset._flat_character_images):
-        indices_by_class[target].append(index)
+    indices_by_class = collect_class_indices(dataset)
     return dataset, indices_by_class
+
+
+def collect_class_indices(dataset: Omniglot) -> dict[int, list[int]]:
+    try:
+        characters = dataset._characters
+        character_images = dataset._flat_character_images
+    except AttributeError:
+        indices_by_class: dict[int, list[int]] = {}
+        for index in range(len(dataset)):
+            _, target = dataset[index]
+            indices_by_class.setdefault(int(target), []).append(index)
+        return indices_by_class
+
+    images_by_character: dict[str, list[tuple[str, int]]] = {}
+    for index, (image_path, target) in enumerate(character_images):
+        character_path = characters[target]
+        images_by_character.setdefault(character_path, []).append((image_path, index))
+
+    return {
+        class_index: [index for _, index in sorted(images)]
+        for class_index, (_, images) in enumerate(sorted(images_by_character.items()))
+    }
 
 
 def create_episodes(
@@ -114,7 +136,7 @@ def evaluate_metric(
     metric: str,
     device: str,
     batch_size: int,
-) -> dict[str, float]:
+) -> tuple[dict[str, float], list[float]]:
     model = PrototypicalNetwork(
         encoder,
         device=device,
@@ -143,16 +165,44 @@ def evaluate_metric(
     average = mean(episode_accuracies)
     standard_deviation = stdev(episode_accuracies) if len(episode_accuracies) > 1 else 0.0
     confidence_interval = 1.96 * standard_deviation / math.sqrt(len(episode_accuracies))
+    return (
+        {
+            "mean_accuracy_percent": round(average, 2),
+            "episode_std_percent": round(standard_deviation, 2),
+            "ci95_percent": round(confidence_interval, 2),
+        },
+        episode_accuracies,
+    )
+
+
+def compare_metrics(cosine: list[float], euclidean: list[float]) -> dict[str, float | bool | str]:
+    if not cosine or len(cosine) != len(euclidean):
+        raise ValueError("metric comparisons require equal non-empty episode results")
+
+    differences = [
+        euclidean_accuracy - cosine_accuracy
+        for cosine_accuracy, euclidean_accuracy in zip(cosine, euclidean, strict=True)
+    ]
+    average = mean(differences)
+    standard_deviation = stdev(differences) if len(differences) > 1 else 0.0
+    confidence_interval = 1.96 * standard_deviation / math.sqrt(len(differences))
+    lower = average - confidence_interval
+    upper = average + confidence_interval
     return {
-        "mean_accuracy_percent": round(average, 2),
-        "episode_std_percent": round(standard_deviation, 2),
-        "ci95_percent": round(confidence_interval, 2),
+        "comparison": "squared_euclidean_minus_cosine",
+        "mean_difference_pp": round(average, 2),
+        "episode_std_difference_pp": round(standard_deviation, 2),
+        "ci95_pp": round(confidence_interval, 2),
+        "ci95_low_pp": round(lower, 2),
+        "ci95_high_pp": round(upper, 2),
+        "excludes_zero": lower > 0 or upper < 0,
     }
 
 
 def run_evaluation(args: argparse.Namespace) -> dict[str, object]:
     import torchvision
 
+    started_at = perf_counter()
     torch.set_num_threads(args.threads)
     dataset, indices_by_class = load_dataset(args.data_dir, args.download)
     episodes = create_episodes(
@@ -164,23 +214,34 @@ def run_evaluation(args: argparse.Namespace) -> dict[str, object]:
         args.seed,
     )
     results = []
+    comparisons = []
     for encoder_name in args.encoders:
         encoder, transform = create_encoder(encoder_name)
         image_loader = partial(load_image, dataset, transform=transform)
+        episode_results: dict[str, list[float]] = {}
         for metric in args.metrics:
+            summary, accuracies = evaluate_metric(
+                episodes,
+                image_loader,
+                encoder,
+                metric,
+                args.device,
+                args.batch_size,
+            )
+            episode_results[metric] = accuracies
             results.append(
                 {
                     "encoder": encoder_name,
                     "weights": "ImageNet-1K" if encoder_name != "statistical" else "none",
                     "metric": metric,
-                    **evaluate_metric(
-                        episodes,
-                        image_loader,
-                        encoder,
-                        metric,
-                        args.device,
-                        args.batch_size,
-                    ),
+                    **summary,
+                }
+            )
+        if "cosine" in episode_results and "euclidean" in episode_results:
+            comparisons.append(
+                {
+                    "encoder": encoder_name,
+                    **compare_metrics(episode_results["cosine"], episode_results["euclidean"]),
                 }
             )
 
@@ -190,6 +251,7 @@ def run_evaluation(args: argparse.Namespace) -> dict[str, object]:
             "python": platform.python_version(),
             "pytorch": torch.__version__,
             "torchvision": torchvision.__version__,
+            "pillow": PIL.__version__,
             "device": args.device,
             "threads": args.threads,
         },
@@ -202,6 +264,8 @@ def run_evaluation(args: argparse.Namespace) -> dict[str, object]:
             "rejection_threshold": None,
         },
         "results": results,
+        "paired_comparisons": comparisons,
+        "elapsed_seconds": round(perf_counter() - started_at, 1),
     }
 
 
