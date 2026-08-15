@@ -29,6 +29,9 @@ def test_benchmark_runs() -> None:
     )
 
     result = json.loads(completed.stdout)
-    assert result["cached_prototypes"]["median_ms"] > 0
-    assert result["recomputed_prototypes"]["median_ms"] > 0
+    measurement = result["measurements"][0]
+    assert measurement["cached_prototypes"]["median_ms"] > 0
+    assert measurement["recomputed_prototypes"]["median_ms"] > 0
+    assert measurement["predicted_speedup"] == 2.0
     assert result["encoder"]["parameters"] == 0
+    assert result["encoder"]["estimated_flops_per_image"] == 1155

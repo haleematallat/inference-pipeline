@@ -25,9 +25,11 @@ inference architecture, not a claim of a new learning algorithm.
 
 ## Baseline and contribution
 
-The direct baseline embeds the support set and rebuilds class prototypes before every query
-batch. This pipeline calculates them once when the backend starts, then reuses them until the
-support set changes. The result is less repeated work without changing the classifier's output.
+The implementation baseline embeds the support set and rebuilds class prototypes before every
+query batch. This pipeline calculates them when the backend starts, then reuses them until the
+support set changes. The resulting latency reduction is expected from removing repeated support
+encoding; the benchmark below validates that the implementation follows that cost model rather
+than presenting prototype caching as a new optimization.
 
 The repository was implemented as a standalone codebase rather than forked from a research
 implementation. It applies an existing few-shot method and adds the parts needed to run it as a
@@ -176,6 +178,37 @@ The most useful adaptation points are:
 - `src/vision_pipeline/streams/base.py` and `streams/factory.py` for another source or sink.
 - `src/vision_pipeline/models/encoders.py` for another PyTorch feature extractor.
 
+The classifier can also be used directly with any encoder that returns one feature vector per
+image. This complete example uses channel means:
+
+~~~python
+from torch import nn
+from vision_pipeline.models import PrototypicalNetwork
+
+class ChannelMeanEncoder(nn.Module):
+    def forward(self, images):
+        return images.mean(dim=(2, 3))
+
+model = PrototypicalNetwork(ChannelMeanEncoder(), similarity_metric="cosine")
+model.fit_support(support_tensor, ["cat", "cat", "dog", "dog"])
+predictions = model.predict(query_tensor)
+~~~
+
+An alternative backend can extend an existing implementation and register without changing the
+pipeline or runner:
+
+~~~python
+from vision_pipeline.clients.factory import InferenceBackendFactory
+from vision_pipeline.clients.pytorch_backend import PyTorchBackend
+
+@InferenceBackendFactory.register("top1_local")
+class Top1LocalBackend(PyTorchBackend):
+    def predict(self, images):
+        return [ranked[:1] for ranked in super().predict(images)]
+~~~
+
+Set `backend.type` to `top1_local`; the factory supplies it to the existing few-shot runner.
+
 ## Redis
 
 RedisStreamHandler is available in vision_pipeline.streams.redis_stream. It accepts a Redis URL
@@ -254,36 +287,80 @@ The compose file builds only the standalone pipeline and writes results to outpu
 
 ## Performance
 
-`benchmarks/benchmark_inference.py` compares cached inference with the direct recomputation
-baseline. It uses deterministic synthetic tensors so it measures the code path without dataset,
-file-system, or network variance.
+`benchmarks/benchmark_inference.py` validates cached inference against the direct recomputation
+baseline with deterministic tensors. If support and query images have the same per-image encoder
+cost and encoder work dominates, the expected speedup is:
+
+$$
+\frac{T_q + T_s}{T_q} = 1 + \frac{N_s}{N_q}
+$$
 
 ~~~bash
 python benchmarks/benchmark_inference.py
 ~~~
 
-Reference CPU run: AMD EPYC 9V74, PyTorch 2.9.1+cpu, one thread, 5-way 5-shot support,
-32 query images of size 32 x 32, 50 warmup iterations, and 300 measured iterations.
+Reference CPU run: AMD EPYC 9V74, PyTorch 2.9.1+cpu, one thread, five classes, 32 queries,
+32 x 32 inputs, 30 warmup iterations, and 200 measured iterations.
 
-| Path | Median batch latency | p95 batch latency | Throughput |
-| --- | ---: | ---: | ---: |
-| Cached prototypes | 0.742 ms | 0.856 ms | 43,127 images/s |
-| Recompute prototypes per batch | 1.410 ms | 1.572 ms | 22,697 images/s |
+| Shots per class | Support images | Predicted | Measured | Cached median | Recomputed median |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 5 | 1.156x | 1.390x | 0.751 ms | 1.044 ms |
+| 5 | 25 | 1.781x | 1.874x | 0.757 ms | 1.418 ms |
+| 10 | 50 | 2.562x | 2.541x | 0.745 ms | 1.893 ms |
+| 20 | 100 | 4.125x | 3.839x | 0.754 ms | 2.894 ms |
 
-Prototype setup took a median 0.615 ms. Moving it out of the query path produced a 1.90x median
-speedup for this small deterministic encoder. These are core model-path measurements, not
-end-to-end service numbers; preprocessing, disk I/O, Triton transport, and real encoder cost are
-excluded. Run the script on deployment hardware before selecting a batch size or latency target.
+The relation is an encoder-only expectation, not an exact end-to-end identity. Prototype
+construction, scoring, Python dispatch, and measurement noise explain the remaining difference.
+The sweep is evidence that support work moves out of the query path as intended, not a claim of
+an algorithmic improvement.
 
-The statistical demo encoder has no learned parameters. A GFLOP total is not reported for it
-because its work is tensor reductions rather than the convolution and matrix operations counted
-by common model profilers. For the optional 224 x 224 torchvision encoders, the published model
-costs are 0.06 GFLOPs for MobileNetV3 Small and 1.81 GFLOPs for ResNet18. Those are encoder
-reference values, not measurements of this complete pipeline.
+The same 5-way 5-shot workload with an untrained MobileNetV3 Small feature extractor at 224 x
+224 measured 123.404 ms cached and 214.334 ms with recomputation: 1.737x observed against 1.781x
+predicted. Weights do not affect compute cost; the untrained model avoids a download in the
+latency benchmark. These are model-core measurements and exclude image decoding, stream I/O,
+Triton transport, and concurrency.
 
-CUDA can be selected for local PyTorch inference. Triton can combine requests with dynamic
-batching, but adds serialization and network latency; local and remote paths should be compared
-under the same concurrency and batch settings.
+`torch.utils.flop_counter.FlopCounterMode` reports 0.110 GFLOPs per image for this repository's
+MobileNetV3 Small feature extractor at 224 x 224. The statistical encoder reports zero because
+the profiler does not count its reduction operators. An explicit estimate of its means, variance
+terms, and quadrant reductions gives 18,435 scalar operations, or approximately 0.000018 GFLOPs,
+per 32 x 32 image. FLOP conventions differ, so the script exposes both the profiler result and
+the explicit reduction estimate.
+
+Run the realistic encoder benchmark with:
+
+~~~bash
+python benchmarks/benchmark_inference.py \
+  --encoder mobilenet_v3_small --image-size 224 --shots 5
+~~~
+
+## Omniglot evaluation
+
+The repository now includes a closed-set accuracy evaluation on the Omniglot evaluation split.
+It uses 100 fixed 5-way 5-shot episodes, 15 queries per class, and seed 7. The statistical encoder
+is deterministic and untrained; MobileNetV3 Small uses frozen ImageNet-1K weights without
+fine-tuning on Omniglot.
+
+| Encoder | Metric | Mean accuracy | Episode standard deviation | 95% CI |
+| --- | --- | ---: | ---: | ---: |
+| Statistical, no weights | Cosine | 63.23% | 10.87% | +/- 2.13% |
+| Statistical, no weights | Euclidean | 63.23% | 10.87% | +/- 2.13% |
+| MobileNetV3 Small, ImageNet-1K | Cosine | 92.52% | 4.92% | +/- 0.96% |
+| MobileNetV3 Small, ImageNet-1K | Euclidean | 92.52% | 4.92% | +/- 0.96% |
+
+Cosine and Euclidean produce identical class rankings here because query embeddings and class
+prototypes are L2-normalized. Their score scales still differ, so rejection thresholds are not
+interchangeable. Rejection is disabled for this closed-set table and requires separate unknown
+classes plus held-out calibration data.
+
+~~~bash
+pip install -e ".[vision]"
+python benchmarks/evaluate_omniglot.py --download
+~~~
+
+This is a frozen-encoder system check, not a reproduction of the trained Omniglot result from the
+Prototypical Networks paper. The script downloads the evaluation split and official torchvision
+weights on first use, then emits the protocol and results as JSON.
 
 ## Related approaches
 
@@ -298,14 +375,28 @@ Docker and Triton are deliberate deployment boundaries around the few-shot metho
 substitutes for model comparison, so evaluation against the alternatives above remains separate
 work.
 
+## Related tools
+
+| Tool | Primary focus | Difference from this repository |
+| --- | --- | --- |
+| EasyFSL | Few-shot methods, tasks, and research examples | Broader method coverage; this project focuses on configurable inference and Triton parity |
+| learn2learn | Meta-learning algorithms and benchmark utilities | Includes training and research workflows; this project is a smaller inference system |
+| Ray Serve | General distributed model serving | Provides scaling and deployment primitives without few-shot prototype semantics |
+| TorchServe | PyTorch model serving | Model archive and serving workflow; currently under limited maintenance |
+
+The closest method-level neighbour is EasyFSL. The closest serving alternatives are Triton,
+which is implemented here, and general serving frameworks such as Ray Serve. The distinguishing
+scope is the connection between prototype-based classification, validated configuration, stream
+abstractions, and tested local/Triton embedding parity.
+
 ## Future improvements
 
-- Replace the color demonstration set with a representative image dataset and report measured
-  classification, rejection, and per-class metrics.
+- Evaluate a representative application dataset with per-class metrics and confidence intervals;
+  Omniglot currently verifies only generic closed-set few-shot behavior.
 - Compare the current prototypical classifier with Matching Networks and Relation Networks under
   the same few-shot episodes, plus a CLIP zero-shot baseline using the same class vocabulary.
-- Add threshold calibration against a held-out validation set instead of selecting similarity
-  thresholds manually.
+- Add unknown classes to the episode protocol and report rejection AUROC, false-accept rate, and
+  thresholds calibrated on a separate validation split.
 - Add a training and fine-tuning workflow that exports compatible encoder checkpoints with
   reproducible dataset and experiment configuration.
 - Extend the Triton model repository with a GPU-backed encoder and benchmark local PyTorch and
@@ -327,3 +418,8 @@ Licensed under the MIT License. See `LICENSE`.
 5. PyTorch, [MobileNetV3 Small model documentation](https://docs.pytorch.org/vision/stable/models/generated/torchvision.models.mobilenet_v3_small.html).
 6. PyTorch, [ResNet18 model documentation](https://docs.pytorch.org/vision/stable/models/generated/torchvision.models.resnet18.html).
 7. NVIDIA, [Triton dynamic batcher documentation](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/batcher.html).
+8. Lake, Salakhutdinov, and Tenenbaum, [Human-level concept learning through probabilistic program induction](https://www.science.org/doi/10.1126/science.aab3050), Science 2015.
+9. Sicara, [EasyFSL: Easy Few-Shot Learning](https://github.com/sicara/easy-few-shot-learning).
+10. Arnold et al., [learn2learn: A Library for Meta-Learning Research](https://arxiv.org/abs/2008.12284), 2020.
+11. Ray, [Ray Serve documentation](https://docs.ray.io/en/latest/serve/index.html).
+12. PyTorch, [TorchServe documentation](https://docs.pytorch.org/serve/).

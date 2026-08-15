@@ -8,8 +8,9 @@ from statistics import median
 from time import perf_counter_ns
 
 import torch
+from torch import nn
 
-from vision_pipeline.models import PrototypicalNetwork, StatisticalEncoder
+from vision_pipeline.models import PrototypicalNetwork, StatisticalEncoder, TorchvisionEncoder
 
 
 def create_inputs(
@@ -66,11 +67,33 @@ def measure(
     }
 
 
-def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
-    torch.set_num_threads(args.threads)
+def create_encoder(name: str, pretrained: bool) -> nn.Module:
+    if name == "statistical":
+        return StatisticalEncoder()
+    return TorchvisionEncoder(name=name, pretrained=pretrained)
+
+
+def statistical_encoder_flops(image_size: int) -> int:
+    pixels = image_size * image_size
+    return 18 * pixels + 3
+
+
+def profile_encoder_flops(encoder: nn.Module, image_size: int, device: str) -> int | None:
+    try:
+        from torch.utils.flop_counter import FlopCounterMode
+    except ImportError:
+        return None
+
+    encoder = encoder.to(device).eval()
+    with torch.inference_mode(), FlopCounterMode(display=False) as counter:
+        encoder(torch.rand((1, 3, image_size, image_size), device=device))
+    return int(counter.get_total_flops())
+
+
+def benchmark_shots(args: argparse.Namespace, shots: int) -> dict[str, object]:
     support, labels, query = create_inputs(
         args.classes,
-        args.shots,
+        shots,
         args.batch_size,
         args.image_size,
     )
@@ -78,12 +101,12 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
     query = query.to(args.device)
 
     cached_model = PrototypicalNetwork(
-        StatisticalEncoder(),
+        create_encoder(args.encoder, args.pretrained),
         device=args.device,
         top_k=1,
     )
-    uncached_model = PrototypicalNetwork(
-        StatisticalEncoder(),
+    recomputed_model = PrototypicalNetwork(
+        create_encoder(args.encoder, args.pretrained),
         device=args.device,
         top_k=1,
     )
@@ -96,12 +119,12 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
         args.device,
     )
 
-    def predict_without_cache() -> object:
-        uncached_model.fit_support(support, labels)
-        return uncached_model.predict(query)
+    def predict_with_recomputation() -> object:
+        recomputed_model.fit_support(support, labels)
+        return recomputed_model.predict(query)
 
-    uncached = measure(
-        predict_without_cache,
+    recomputed = measure(
+        predict_with_recomputation,
         args.warmup,
         args.iterations,
         args.device,
@@ -112,10 +135,31 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
         args.iterations,
         args.device,
     )
+    predicted_speedup = 1 + (args.classes * shots) / args.batch_size
 
-    cached["images_per_second"] = round(args.batch_size / (cached["median_ms"] / 1000), 1)
-    uncached["images_per_second"] = round(args.batch_size / (uncached["median_ms"] / 1000), 1)
+    return {
+        "shots_per_class": shots,
+        "support_images": args.classes * shots,
+        "predicted_speedup": round(predicted_speedup, 3),
+        "measured_speedup": round(recomputed["median_ms"] / cached["median_ms"], 3),
+        "cached_prototypes": cached,
+        "recomputed_prototypes": recomputed,
+        "prototype_setup": prototype_setup,
+    }
 
+
+def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
+    if args.classes < 1 or args.batch_size < 1 or args.image_size < 2:
+        raise ValueError("classes and batch size must be positive; image size must be at least two")
+    if any(shots < 1 for shots in args.shots):
+        raise ValueError("shots must be at least one")
+    if args.warmup < 0 or args.iterations < 1 or args.threads < 1:
+        raise ValueError("warmup cannot be negative; iterations and threads must be positive")
+
+    torch.set_num_threads(args.threads)
+    encoder = create_encoder(args.encoder, args.pretrained)
+    encoder_flops = statistical_encoder_flops(args.image_size) if args.encoder == "statistical" else None
+    profiled_flops = profile_encoder_flops(encoder, args.image_size, args.device)
     return {
         "environment": {
             "python": platform.python_version(),
@@ -132,24 +176,37 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, object]:
             "iterations": args.iterations,
         },
         "encoder": {
-            "name": "statistical",
-            "parameters": sum(parameter.numel() for parameter in cached_model.encoder.parameters()),
+            "name": args.encoder,
+            "pretrained": args.pretrained,
+            "parameters": sum(parameter.numel() for parameter in encoder.parameters()),
+            "profiled_flops_per_image": profiled_flops,
+            "profiled_gflops_per_image": (
+                round(profiled_flops / 1_000_000_000, 6) if profiled_flops is not None else None
+            ),
+            "estimated_flops_per_image": encoder_flops,
+            "estimated_gflops_per_image": (
+                round(encoder_flops / 1_000_000_000, 9) if encoder_flops is not None else None
+            ),
         },
-        "cached_prototypes": cached,
-        "recomputed_prototypes": uncached,
-        "prototype_setup": prototype_setup,
-        "median_speedup": round(uncached["median_ms"] / cached["median_ms"], 2),
+        "speedup_model": "1 + support_images / query_images",
+        "measurements": [benchmark_shots(args, shots) for shots in args.shots],
     }
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--classes", type=int, default=5)
-    parser.add_argument("--shots", type=int, default=5)
+    parser.add_argument("--shots", type=int, nargs="+", default=[1, 5, 10, 20])
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--image-size", type=int, default=32)
     parser.add_argument("--warmup", type=int, default=50)
     parser.add_argument("--iterations", type=int, default=300)
+    parser.add_argument(
+        "--encoder",
+        choices=["statistical", "mobilenet_v3_small", "resnet18"],
+        default="statistical",
+    )
+    parser.add_argument("--pretrained", action="store_true")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--threads", type=int, default=1)
     return parser.parse_args()
