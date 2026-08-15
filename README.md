@@ -6,6 +6,10 @@ default path performs real few-shot image classification with PyTorch: it embeds
 images, builds one prototype per class, embeds query images, ranks prototypes by similarity,
 applies an unknown-class threshold, and writes deterministic JSONL output.
 
+This is a few-shot pipeline, not a zero-shot model. Its model path follows the established
+prototypical-network method; the work here is the standalone implementation and the surrounding
+inference architecture, not a claim of a new learning algorithm.
+
 ## Capabilities
 
 - Local PyTorch inference on CPU or CUDA.
@@ -18,6 +22,18 @@ applies an unknown-class threshold, and writes deterministic JSONL output.
 - Triton gRPC inference with a runnable CPU model repository.
 - Optional pretrained ResNet18 or MobileNetV3 encoders through torchvision.
 - Reproducible offline demo and deterministic tests.
+
+## Baseline and contribution
+
+The direct baseline embeds the support set and rebuilds class prototypes before every query
+batch. This pipeline calculates them once when the backend starts, then reuses them until the
+support set changes. The result is less repeated work without changing the classifier's output.
+
+The repository was implemented as a standalone codebase rather than forked from a research
+implementation. It applies an existing few-shot method and adds the parts needed to run it as a
+maintainable inference service: validated configuration, replaceable runners and backends,
+stream boundaries, rejection handling, local and Triton execution, Docker, and CI. It does not
+claim an accuracy improvement over the original prototypical-network paper.
 
 ## Architecture
 
@@ -152,6 +168,14 @@ runners do not require a conditional branch. A backend follows the same pattern:
 InferenceBackend, register it with InferenceBackendFactory, and accept validated configuration.
 Keep optional imports inside the implementation module.
 
+The most useful adaptation points are:
+
+- `configs/demo.yaml` for a new support set, encoder, threshold, or batch size.
+- `src/vision_pipeline/runners/few_shot_classification.py` for task-level behavior.
+- `src/vision_pipeline/clients/base.py` and `clients/factory.py` for another inference backend.
+- `src/vision_pipeline/streams/base.py` and `streams/factory.py` for another source or sink.
+- `src/vision_pipeline/models/encoders.py` for another PyTorch feature extractor.
+
 ## Redis
 
 RedisStreamHandler is available in vision_pipeline.streams.redis_stream. It accepts a Redis URL
@@ -230,15 +254,56 @@ The compose file builds only the standalone pipeline and writes results to outpu
 
 ## Performance
 
-Support images are embedded only at startup. Query inference is batched according to batch_size.
-CUDA can be selected for local PyTorch inference. Triton enables server-side dynamic batching,
-but adds serialization and network latency. Benchmark preprocessing, encoder latency, batch size,
-and stream backpressure on the intended hardware.
+`benchmarks/benchmark_inference.py` compares cached inference with the direct recomputation
+baseline. It uses deterministic synthetic tensors so it measures the code path without dataset,
+file-system, or network variance.
+
+~~~bash
+python benchmarks/benchmark_inference.py
+~~~
+
+Reference CPU run: AMD EPYC 9V74, PyTorch 2.9.1+cpu, one thread, 5-way 5-shot support,
+32 query images of size 32 x 32, 50 warmup iterations, and 300 measured iterations.
+
+| Path | Median batch latency | p95 batch latency | Throughput |
+| --- | ---: | ---: | ---: |
+| Cached prototypes | 0.742 ms | 0.856 ms | 43,127 images/s |
+| Recompute prototypes per batch | 1.410 ms | 1.572 ms | 22,697 images/s |
+
+Prototype setup took a median 0.615 ms. Moving it out of the query path produced a 1.90x median
+speedup for this small deterministic encoder. These are core model-path measurements, not
+end-to-end service numbers; preprocessing, disk I/O, Triton transport, and real encoder cost are
+excluded. Run the script on deployment hardware before selecting a batch size or latency target.
+
+The statistical demo encoder has no learned parameters. A GFLOP total is not reported for it
+because its work is tensor reductions rather than the convolution and matrix operations counted
+by common model profilers. For the optional 224 x 224 torchvision encoders, the published model
+costs are 0.06 GFLOPs for MobileNetV3 Small and 1.81 GFLOPs for ResNet18. Those are encoder
+reference values, not measurements of this complete pipeline.
+
+CUDA can be selected for local PyTorch inference. Triton can combine requests with dynamic
+batching, but adds serialization and network latency; local and remote paths should be compared
+under the same concurrency and batch settings.
+
+## Related approaches
+
+| Approach | Class information at inference | Comparison | Status here |
+| --- | --- | --- | --- |
+| Prototypical Networks | Labelled support images | Distance to each class mean | Implemented |
+| Matching Networks | Labelled support images | Attention over support examples | Future comparison |
+| Relation Networks | Labelled support images | Learned relation function | Future comparison |
+| CLIP | Class text prompts | Image-text similarity | Future zero-shot baseline |
+
+Docker and Triton are deliberate deployment boundaries around the few-shot method. They are not
+substitutes for model comparison, so evaluation against the alternatives above remains separate
+work.
 
 ## Future improvements
 
 - Replace the color demonstration set with a representative image dataset and report measured
-  classification and rejection metrics.
+  classification, rejection, and per-class metrics.
+- Compare the current prototypical classifier with Matching Networks and Relation Networks under
+  the same few-shot episodes, plus a CLIP zero-shot baseline using the same class vocabulary.
 - Add threshold calibration against a held-out validation set instead of selecting similarity
   thresholds manually.
 - Add a training and fine-tuning workflow that exports compatible encoder checkpoints with
@@ -248,3 +313,17 @@ and stream backpressure on the intended hardware.
 - Add a container-level integration test that starts Triton, runs the complete demo, and compares
   its predictions with the local backend.
 - Add asynchronous stream processing and explicit backpressure policies for sustained workloads.
+
+## License
+
+Licensed under the MIT License. See `LICENSE`.
+
+## References
+
+1. Snell, Swersky, and Zemel, [Prototypical Networks for Few-shot Learning](https://papers.nips.cc/paper/6996-prototypical-networks-for-few-shot-learning), NeurIPS 2017.
+2. Vinyals et al., [Matching Networks for One Shot Learning](https://proceedings.neurips.cc/paper/2016/hash/90e1357833654983612fb05e3ec9148c-Abstract.html), NeurIPS 2016.
+3. Sung et al., [Learning to Compare: Relation Network for Few-Shot Learning](https://openaccess.thecvf.com/content_cvpr_2018/html/Sung_Learning_to_Compare_CVPR_2018_paper.html), CVPR 2018.
+4. Radford et al., [Learning Transferable Visual Models From Natural Language Supervision](https://proceedings.mlr.press/v139/radford21a.html), ICML 2021.
+5. PyTorch, [MobileNetV3 Small model documentation](https://docs.pytorch.org/vision/stable/models/generated/torchvision.models.mobilenet_v3_small.html).
+6. PyTorch, [ResNet18 model documentation](https://docs.pytorch.org/vision/stable/models/generated/torchvision.models.resnet18.html).
+7. NVIDIA, [Triton dynamic batcher documentation](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/user_guide/batcher.html).
