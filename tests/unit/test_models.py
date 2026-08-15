@@ -39,10 +39,16 @@ def test_statistical_encoder_output_shape():
     assert output.shape == (2, 18)
 
 
-def test_embedding_normalization():
+def test_cosine_embedding_normalization():
     model = PrototypicalNetwork(MeanEncoder())
     embeddings = model.embed(make_images())
     assert torch.allclose(torch.linalg.vector_norm(embeddings, dim=1), torch.ones(4))
+
+
+def test_euclidean_embeddings_are_not_normalized():
+    model = PrototypicalNetwork(MeanEncoder(), similarity_metric="euclidean")
+    embeddings = model.embed(make_images())
+    assert torch.allclose(embeddings, make_images().flatten(start_dim=1))
 
 
 def test_prototype_calculation():
@@ -104,6 +110,30 @@ def test_euclidean_similarity():
     prediction = model.predict(make_images()[2:3])[0][0]
     assert prediction.class_name == "blue"
     assert prediction.accepted is True
+
+
+def test_euclidean_score_is_negative_squared_distance():
+    model = PrototypicalNetwork(MeanEncoder(), similarity_metric="euclidean")
+    model.fit_support(torch.zeros((1, 3, 1, 1)), ["origin"])
+    prediction = model.predict(torch.tensor([[[[2.0]], [[0.0]], [[0.0]]]]))[0][0]
+    assert prediction.similarity == -4.0
+
+
+def test_similarity_metrics_can_change_ranking():
+    support = torch.tensor(
+        [
+            [[[10.0]], [[0.0]], [[0.0]]],
+            [[[1.0]], [[1.0]], [[0.0]]],
+        ]
+    )
+    query = torch.tensor([[[[1.0]], [[0.0]], [[0.0]]]])
+    cosine = PrototypicalNetwork(MeanEncoder(), similarity_metric="cosine")
+    euclidean = PrototypicalNetwork(MeanEncoder(), similarity_metric="euclidean")
+    cosine.fit_support(support, ["same-angle", "nearby"])
+    euclidean.fit_support(support, ["same-angle", "nearby"])
+
+    assert cosine.predict(query)[0][0].class_name == "same-angle"
+    assert euclidean.predict(query)[0][0].class_name == "nearby"
 
 
 def test_support_set_discovery(tmp_path, solid_image):

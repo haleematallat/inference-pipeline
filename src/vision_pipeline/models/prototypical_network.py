@@ -43,7 +43,9 @@ class PrototypicalNetwork:
         with torch.inference_mode():
             embeddings = self.encoder(images.to(self.device))
             embeddings = embeddings.flatten(start_dim=1)
-            return functional.normalize(embeddings, p=2, dim=1)
+            if self.similarity_metric == "cosine":
+                return functional.normalize(embeddings, p=2, dim=1)
+            return embeddings
 
     def fit_support(self, support_images: torch.Tensor, labels: list[str]) -> torch.Tensor:
         if support_images.shape[0] == 0:
@@ -58,7 +60,9 @@ class PrototypicalNetwork:
             indices = [index for index, label in enumerate(labels) if label == class_name]
             class_embeddings = support_embeddings[indices]
             prototype = class_embeddings.mean(dim=0, keepdim=True)
-            prototypes.append(functional.normalize(prototype, p=2, dim=1))
+            if self.similarity_metric == "cosine":
+                prototype = functional.normalize(prototype, p=2, dim=1)
+            prototypes.append(prototype)
         self.prototypes = torch.cat(prototypes, dim=0)
         return self.prototypes
 
@@ -76,7 +80,7 @@ class PrototypicalNetwork:
         if self.similarity_metric == "cosine":
             scores = query_embeddings @ self.prototypes.T
         else:
-            scores = -torch.cdist(query_embeddings, self.prototypes, p=2)
+            scores = -torch.cdist(query_embeddings, self.prototypes, p=2).square()
 
         result = []
         top_k = min(self.top_k, len(self.class_names))

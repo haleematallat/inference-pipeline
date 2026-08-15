@@ -5,27 +5,53 @@ import json
 import math
 import platform
 import random
-from collections import defaultdict
+from collections.abc import Callable
+from functools import partial
 from statistics import mean, stdev
+from time import perf_counter
+from typing import TYPE_CHECKING
 
+import PIL
 import torch
-import torch.nn.functional as functional
+from PIL import Image
 
-from vision_pipeline.models import StatisticalEncoder, TorchvisionEncoder
+from vision_pipeline.models import PrototypicalNetwork, StatisticalEncoder, TorchvisionEncoder
+
+if TYPE_CHECKING:
+    from torchvision.datasets import Omniglot
 
 
-def load_dataset(root: str, download: bool) -> tuple[object, dict[int, list[int]]]:
+def load_dataset(root: str, download: bool) -> tuple[Omniglot, dict[int, list[int]]]:
     try:
         from torchvision.datasets import Omniglot
     except ImportError as error:
         raise RuntimeError("Omniglot evaluation requires installation with the 'vision' extra") from error
 
     dataset = Omniglot(root=root, background=False, download=download)
-    indices_by_class: dict[int, list[int]] = defaultdict(list)
-    for index in range(len(dataset)):
-        _, target = dataset[index]
-        indices_by_class[target].append(index)
+    indices_by_class = collect_class_indices(dataset)
     return dataset, indices_by_class
+
+
+def collect_class_indices(dataset: Omniglot) -> dict[int, list[int]]:
+    try:
+        characters = dataset._characters
+        character_images = dataset._flat_character_images
+    except AttributeError:
+        indices_by_class: dict[int, list[int]] = {}
+        for index in range(len(dataset)):
+            _, target = dataset[index]
+            indices_by_class.setdefault(int(target), []).append(index)
+        return indices_by_class
+
+    images_by_character: dict[str, list[tuple[str, int]]] = {}
+    for index, (image_path, target) in enumerate(character_images):
+        character_path = characters[target]
+        images_by_character.setdefault(character_path, []).append((image_path, index))
+
+    return {
+        class_index: [index for _, index in sorted(images)]
+        for class_index, (_, images) in enumerate(sorted(images_by_character.items()))
+    }
 
 
 def create_episodes(
@@ -70,7 +96,7 @@ def create_episodes(
     return result
 
 
-def create_encoder(name: str, device: str) -> tuple[torch.nn.Module, object]:
+def create_encoder(name: str) -> tuple[torch.nn.Module, Callable[[Image.Image], torch.Tensor]]:
     try:
         from torchvision import transforms
         from torchvision.models import MobileNet_V3_Small_Weights, ResNet18_Weights
@@ -92,68 +118,91 @@ def create_encoder(name: str, device: str) -> tuple[torch.nn.Module, object]:
     else:
         encoder = TorchvisionEncoder(name=name, pretrained=True)
         transform = ResNet18_Weights.DEFAULT.transforms()
-    return encoder.to(device).eval(), transform
+    return encoder, transform
 
 
-def embed_images(
-    dataset: object,
-    indices: list[int],
-    encoder: torch.nn.Module,
-    transform: object,
-    batch_size: int,
-    device: str,
-) -> dict[int, torch.Tensor]:
-    embeddings = {}
-    for start in range(0, len(indices), batch_size):
-        batch_indices = indices[start : start + batch_size]
-        images = []
-        for index in batch_indices:
-            image, _ = dataset[index]  # type: ignore[index]
-            images.append(transform(image.convert("RGB")))  # type: ignore[operator]
-        with torch.inference_mode():
-            values = encoder(torch.stack(images).to(device)).flatten(start_dim=1)
-            values = functional.normalize(values, p=2, dim=1).cpu()
-        embeddings.update(zip(batch_indices, values, strict=True))
-    return embeddings
+def load_image(
+    dataset: Omniglot,
+    index: int,
+    transform: Callable[[Image.Image], torch.Tensor],
+) -> torch.Tensor:
+    return transform(dataset[index][0].convert("RGB"))
 
 
 def evaluate_metric(
     episodes: list[dict[str, list[int]]],
-    embeddings: dict[int, torch.Tensor],
+    image_loader: Callable[[int], torch.Tensor],
+    encoder: torch.nn.Module,
     metric: str,
-    ways: int,
-) -> dict[str, float]:
+    device: str,
+    batch_size: int,
+) -> tuple[dict[str, float], list[float]]:
+    model = PrototypicalNetwork(
+        encoder,
+        device=device,
+        similarity_metric=metric,
+        rejection_threshold=float("-inf"),
+    )
     episode_accuracies = []
     for episode in episodes:
-        support = torch.stack([embeddings[index] for index in episode["support_indices"]])
-        query = torch.stack([embeddings[index] for index in episode["query_indices"]])
-        support_labels = torch.tensor(episode["support_labels"])
-        query_labels = torch.tensor(episode["query_labels"])
-        prototypes = []
-        for class_index in range(ways):
-            prototype = support[support_labels == class_index].mean(dim=0, keepdim=True)
-            prototypes.append(functional.normalize(prototype, p=2, dim=1))
-        prototype_tensor = torch.cat(prototypes)
-        if metric == "cosine":
-            scores = query @ prototype_tensor.T
-        else:
-            scores = -torch.cdist(query, prototype_tensor, p=2)
-        accuracy = (scores.argmax(dim=1) == query_labels).float().mean().item()
-        episode_accuracies.append(accuracy * 100)
+        support = torch.stack([image_loader(index) for index in episode["support_indices"]])
+        support_labels = [str(label) for label in episode["support_labels"]]
+        model.fit_support(support, support_labels)
+
+        predicted_labels = []
+        query_indices = episode["query_indices"]
+        for start in range(0, len(query_indices), batch_size):
+            batch_indices = query_indices[start : start + batch_size]
+            query = torch.stack([image_loader(index) for index in batch_indices])
+            predictions = model.predict(query)
+            predicted_labels.extend(int(ranked[0].class_name) for ranked in predictions)
+        correct = sum(
+            predicted == expected
+            for predicted, expected in zip(predicted_labels, episode["query_labels"], strict=True)
+        )
+        episode_accuracies.append(correct / len(predicted_labels) * 100)
 
     average = mean(episode_accuracies)
     standard_deviation = stdev(episode_accuracies) if len(episode_accuracies) > 1 else 0.0
     confidence_interval = 1.96 * standard_deviation / math.sqrt(len(episode_accuracies))
+    return (
+        {
+            "mean_accuracy_percent": round(average, 2),
+            "episode_std_percent": round(standard_deviation, 2),
+            "ci95_percent": round(confidence_interval, 2),
+        },
+        episode_accuracies,
+    )
+
+
+def compare_metrics(cosine: list[float], euclidean: list[float]) -> dict[str, float | bool | str]:
+    if not cosine or len(cosine) != len(euclidean):
+        raise ValueError("metric comparisons require equal non-empty episode results")
+
+    differences = [
+        euclidean_accuracy - cosine_accuracy
+        for cosine_accuracy, euclidean_accuracy in zip(cosine, euclidean, strict=True)
+    ]
+    average = mean(differences)
+    standard_deviation = stdev(differences) if len(differences) > 1 else 0.0
+    confidence_interval = 1.96 * standard_deviation / math.sqrt(len(differences))
+    lower = average - confidence_interval
+    upper = average + confidence_interval
     return {
-        "mean_accuracy_percent": round(average, 2),
-        "episode_std_percent": round(standard_deviation, 2),
-        "ci95_percent": round(confidence_interval, 2),
+        "comparison": "squared_euclidean_minus_cosine",
+        "mean_difference_pp": round(average, 2),
+        "episode_std_difference_pp": round(standard_deviation, 2),
+        "ci95_pp": round(confidence_interval, 2),
+        "ci95_low_pp": round(lower, 2),
+        "ci95_high_pp": round(upper, 2),
+        "excludes_zero": lower > 0 or upper < 0,
     }
 
 
 def run_evaluation(args: argparse.Namespace) -> dict[str, object]:
     import torchvision
 
+    started_at = perf_counter()
     torch.set_num_threads(args.threads)
     dataset, indices_by_class = load_dataset(args.data_dir, args.download)
     episodes = create_episodes(
@@ -164,33 +213,35 @@ def run_evaluation(args: argparse.Namespace) -> dict[str, object]:
         args.episodes,
         args.seed,
     )
-    used_indices = sorted(
-        {
-            index
-            for episode in episodes
-            for key in ("support_indices", "query_indices")
-            for index in episode[key]
-        }
-    )
-
     results = []
+    comparisons = []
     for encoder_name in args.encoders:
-        encoder, transform = create_encoder(encoder_name, args.device)
-        embeddings = embed_images(
-            dataset,
-            used_indices,
-            encoder,
-            transform,
-            args.batch_size,
-            args.device,
-        )
+        encoder, transform = create_encoder(encoder_name)
+        image_loader = partial(load_image, dataset, transform=transform)
+        episode_results: dict[str, list[float]] = {}
         for metric in args.metrics:
+            summary, accuracies = evaluate_metric(
+                episodes,
+                image_loader,
+                encoder,
+                metric,
+                args.device,
+                args.batch_size,
+            )
+            episode_results[metric] = accuracies
             results.append(
                 {
                     "encoder": encoder_name,
                     "weights": "ImageNet-1K" if encoder_name != "statistical" else "none",
                     "metric": metric,
-                    **evaluate_metric(episodes, embeddings, metric, args.ways),
+                    **summary,
+                }
+            )
+        if "cosine" in episode_results and "euclidean" in episode_results:
+            comparisons.append(
+                {
+                    "encoder": encoder_name,
+                    **compare_metrics(episode_results["cosine"], episode_results["euclidean"]),
                 }
             )
 
@@ -200,6 +251,7 @@ def run_evaluation(args: argparse.Namespace) -> dict[str, object]:
             "python": platform.python_version(),
             "pytorch": torch.__version__,
             "torchvision": torchvision.__version__,
+            "pillow": PIL.__version__,
             "device": args.device,
             "threads": args.threads,
         },
@@ -212,6 +264,8 @@ def run_evaluation(args: argparse.Namespace) -> dict[str, object]:
             "rejection_threshold": None,
         },
         "results": results,
+        "paired_comparisons": comparisons,
+        "elapsed_seconds": round(perf_counter() - started_at, 1),
     }
 
 

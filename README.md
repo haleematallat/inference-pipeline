@@ -153,8 +153,9 @@ reproducible or offline deployment.
 }
 ~~~
 
-Similarity is a cosine score or negative Euclidean distance, not a calibrated probability.
-The rejection threshold must be selected with representative validation data.
+Similarity is a cosine score or negative squared Euclidean distance, not a calibrated probability.
+Euclidean scores are non-positive, so rejection thresholds are metric-specific and must be selected
+with representative validation data.
 
 ## Extending the pipeline
 
@@ -311,6 +312,9 @@ Reference CPU run: AMD EPYC 9V74, PyTorch 2.9.1+cpu, one thread, five classes, 3
 
 The relation is an encoder-only expectation, not an exact end-to-end identity. Prototype
 construction, scoring, Python dispatch, and measurement noise explain the remaining difference.
+The 1-shot overshoot and 20-shot undershoot are consistent with fixed recomputation overhead at
+small support sizes and better encoder batch efficiency when all 100 support images are processed
+together.
 The sweep is evidence that support work moves out of the query path as intended, not a claim of
 an algorithmic improvement.
 
@@ -339,28 +343,43 @@ python benchmarks/benchmark_inference.py \
 The repository now includes a closed-set accuracy evaluation on the Omniglot evaluation split.
 It uses 100 fixed 5-way 5-shot episodes, 15 queries per class, and seed 7. The statistical encoder
 is deterministic and untrained; MobileNetV3 Small uses frozen ImageNet-1K weights without
-fine-tuning on Omniglot.
+fine-tuning on Omniglot. Character and image paths are sorted before seeded sampling so the
+episodes do not depend on filesystem enumeration order.
 
 | Encoder | Metric | Mean accuracy | Episode standard deviation | 95% CI |
 | --- | --- | ---: | ---: | ---: |
-| Statistical, no weights | Cosine | 63.23% | 10.87% | +/- 2.13% |
-| Statistical, no weights | Euclidean | 63.23% | 10.87% | +/- 2.13% |
-| MobileNetV3 Small, ImageNet-1K | Cosine | 92.52% | 4.92% | +/- 0.96% |
-| MobileNetV3 Small, ImageNet-1K | Euclidean | 92.52% | 4.92% | +/- 0.96% |
+| Statistical, no weights | Cosine | 59.67% | 10.04% | +/- 1.97% |
+| Statistical, no weights | Squared Euclidean | 63.31% | 10.52% | +/- 2.06% |
+| MobileNetV3 Small, ImageNet-1K | Cosine | 91.31% | 4.99% | +/- 0.98% |
+| MobileNetV3 Small, ImageNet-1K | Squared Euclidean | 89.97% | 4.92% | +/- 0.96% |
 
-Cosine and Euclidean produce identical class rankings here because query embeddings and class
-prototypes are L2-normalized. Their score scales still differ, so rejection thresholds are not
-interchangeable. Rejection is disabled for this closed-set table and requires separate unknown
-classes plus held-out calibration data.
+Both metrics use the same episodes, so the direct comparison is paired rather than inferred from
+the overlapping accuracy intervals above. Differences are squared Euclidean minus cosine:
+
+| Encoder | Mean paired difference | 95% CI | Result under this protocol |
+| --- | ---: | ---: | --- |
+| Statistical, no weights | +3.64 pp | [+2.82, +4.46] pp | Squared Euclidean is higher |
+| MobileNetV3 Small, ImageNet-1K | -1.33 pp | [-1.70, -0.97] pp | Cosine is higher |
+
+Cosine L2-normalizes embeddings and prototypes. Euclidean uses raw embeddings and negative
+squared distance, following the distance form used by Prototypical Networks, so the two modes can
+produce different rankings. Both paired intervals exclude zero, showing that the preferred metric
+depends on the representation in this protocol. Frozen ImageNet features are a different regime
+from embeddings trained end-to-end with the prototypical-network objective. Rejection is disabled
+for this closed-set table and requires separate unknown classes plus held-out calibration data.
 
 ~~~bash
 pip install -e ".[vision]"
-python benchmarks/evaluate_omniglot.py --download
+python benchmarks/evaluate_omniglot.py --download --threads 4
 ~~~
 
 This is a frozen-encoder system check, not a reproduction of the trained Omniglot result from the
-Prototypical Networks paper. The script downloads the evaluation split and official torchvision
-weights on first use, then emits the protocol and results as JSON.
+Prototypical Networks paper. Each episode calls this repository's `fit_support()` and `predict()`
+methods without caching embeddings between metric runs. Expect the full evaluation to take several
+minutes: the published run took 320.0 seconds after downloads on CPU with four intra-op threads.
+It used Python 3.12.13, PyTorch 2.9.1+cpu, torchvision 0.24.1+cpu, and Pillow 12.3.0. The script
+downloads the evaluation split and official torchvision weights on first use, then emits the
+environment, protocol, aggregate results, paired differences, and elapsed time as JSON.
 
 ## Related approaches
 
