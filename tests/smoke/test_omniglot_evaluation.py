@@ -1,6 +1,12 @@
 import runpy
 
 import torch
+from torch import nn
+
+
+class FlattenEncoder(nn.Module):
+    def forward(self, images):
+        return images.flatten(start_dim=1)
 
 
 def test_episode_evaluation_uses_fixed_support_and_query_sets() -> None:
@@ -19,12 +25,21 @@ def test_episode_evaluation_uses_fixed_support_and_query_sets() -> None:
         episodes=3,
         seed=7,
     )
-    embeddings = {
-        index: torch.nn.functional.one_hot(torch.tensor(index // 20), num_classes=5).float()
+    images = {
+        index: torch.nn.functional.one_hot(torch.tensor(index // 20), num_classes=5)
+        .float()
+        .reshape(1, 1, 5)
         for index in range(100)
     }
 
-    result = evaluate_metric(episodes, embeddings, metric="cosine", ways=5)
+    result = evaluate_metric(
+        episodes,
+        images.__getitem__,
+        FlattenEncoder(),
+        metric="cosine",
+        device="cpu",
+        batch_size=8,
+    )
 
     assert result["mean_accuracy_percent"] == 100.0
     assert result["episode_std_percent"] == 0.0

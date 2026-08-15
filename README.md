@@ -153,8 +153,9 @@ reproducible or offline deployment.
 }
 ~~~
 
-Similarity is a cosine score or negative Euclidean distance, not a calibrated probability.
-The rejection threshold must be selected with representative validation data.
+Similarity is a cosine score or negative squared Euclidean distance, not a calibrated probability.
+Euclidean scores are non-positive, so rejection thresholds are metric-specific and must be selected
+with representative validation data.
 
 ## Extending the pipeline
 
@@ -311,6 +312,9 @@ Reference CPU run: AMD EPYC 9V74, PyTorch 2.9.1+cpu, one thread, five classes, 3
 
 The relation is an encoder-only expectation, not an exact end-to-end identity. Prototype
 construction, scoring, Python dispatch, and measurement noise explain the remaining difference.
+The 1-shot overshoot and 20-shot undershoot are consistent with fixed recomputation overhead at
+small support sizes and better encoder batch efficiency when all 100 support images are processed
+together.
 The sweep is evidence that support work moves out of the query path as intended, not a claim of
 an algorithmic improvement.
 
@@ -344,14 +348,15 @@ fine-tuning on Omniglot.
 | Encoder | Metric | Mean accuracy | Episode standard deviation | 95% CI |
 | --- | --- | ---: | ---: | ---: |
 | Statistical, no weights | Cosine | 63.23% | 10.87% | +/- 2.13% |
-| Statistical, no weights | Euclidean | 63.23% | 10.87% | +/- 2.13% |
+| Statistical, no weights | Squared Euclidean | 65.93% | 11.31% | +/- 2.22% |
 | MobileNetV3 Small, ImageNet-1K | Cosine | 92.52% | 4.92% | +/- 0.96% |
-| MobileNetV3 Small, ImageNet-1K | Euclidean | 92.52% | 4.92% | +/- 0.96% |
+| MobileNetV3 Small, ImageNet-1K | Squared Euclidean | 91.41% | 5.56% | +/- 1.09% |
 
-Cosine and Euclidean produce identical class rankings here because query embeddings and class
-prototypes are L2-normalized. Their score scales still differ, so rejection thresholds are not
-interchangeable. Rejection is disabled for this closed-set table and requires separate unknown
-classes plus held-out calibration data.
+Cosine L2-normalizes embeddings and prototypes. Euclidean uses raw embeddings and negative
+squared distance, following the distance form used by Prototypical Networks, so the two modes can
+produce different rankings. The frozen MobileNet features happen to favor cosine in this protocol;
+the untrained statistical features favor Euclidean. Rejection is disabled for this closed-set table
+and requires separate unknown classes plus held-out calibration data.
 
 ~~~bash
 pip install -e ".[vision]"
@@ -359,8 +364,9 @@ python benchmarks/evaluate_omniglot.py --download
 ~~~
 
 This is a frozen-encoder system check, not a reproduction of the trained Omniglot result from the
-Prototypical Networks paper. The script downloads the evaluation split and official torchvision
-weights on first use, then emits the protocol and results as JSON.
+Prototypical Networks paper. Each episode calls this repository's `fit_support()` and `predict()`
+methods without caching embeddings between metric runs. The script downloads the evaluation split
+and official torchvision weights on first use, then emits the protocol and results as JSON.
 
 ## Related approaches
 
