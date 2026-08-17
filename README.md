@@ -342,31 +342,36 @@ python benchmarks/benchmark_inference.py \
 
 The repository now includes a closed-set accuracy evaluation on the Omniglot evaluation split.
 It uses 100 fixed 5-way 5-shot episodes, 15 queries per class, and seed 7. The statistical encoder
-is deterministic and untrained; MobileNetV3 Small uses frozen ImageNet-1K weights without
-fine-tuning on Omniglot. Character and image paths are sorted before seeded sampling so the
-episodes do not depend on filesystem enumeration order.
+is deterministic and untrained; MobileNetV3 Small and ResNet18 use frozen ImageNet-1K weights
+without fine-tuning on Omniglot. Character and image paths are sorted before seeded sampling so
+the episodes do not depend on filesystem enumeration order.
 
 | Encoder | Metric | Mean accuracy | Episode standard deviation | 95% CI |
 | --- | --- | ---: | ---: | ---: |
 | Statistical, no weights | Cosine | 59.67% | 10.04% | +/- 1.97% |
-| Statistical, no weights | Squared Euclidean | 63.31% | 10.52% | +/- 2.06% |
+| Statistical, no weights | Squared Euclidean | 63.32% | 10.53% | +/- 2.06% |
 | MobileNetV3 Small, ImageNet-1K | Cosine | 91.31% | 4.99% | +/- 0.98% |
 | MobileNetV3 Small, ImageNet-1K | Squared Euclidean | 89.97% | 4.92% | +/- 0.96% |
+| ResNet18, ImageNet-1K | Cosine | 91.68% | 4.86% | +/- 0.95% |
+| ResNet18, ImageNet-1K | Squared Euclidean | 91.37% | 5.05% | +/- 0.99% |
 
 Both metrics use the same episodes, so the direct comparison is paired rather than inferred from
 the overlapping accuracy intervals above. Differences are squared Euclidean minus cosine:
 
 | Encoder | Mean paired difference | 95% CI | Result under this protocol |
 | --- | ---: | ---: | --- |
-| Statistical, no weights | +3.64 pp | [+2.82, +4.46] pp | Squared Euclidean is higher |
+| Statistical, no weights | +3.65 pp | [+2.84, +4.47] pp | Squared Euclidean is higher |
 | MobileNetV3 Small, ImageNet-1K | -1.33 pp | [-1.70, -0.97] pp | Cosine is higher |
+| ResNet18, ImageNet-1K | -0.31 pp | [-0.65, +0.04] pp | No clear difference |
 
 Cosine L2-normalizes embeddings and prototypes. Euclidean uses raw embeddings and negative
 squared distance, following the distance form used by Prototypical Networks, so the two modes can
-produce different rankings. Both paired intervals exclude zero, showing that the preferred metric
-depends on the representation in this protocol. Frozen ImageNet features are a different regime
-from embeddings trained end-to-end with the prototypical-network objective. Rejection is disabled
-for this closed-set table and requires separate unknown classes plus held-out calibration data.
+produce different rankings. The statistical and MobileNetV3 intervals exclude zero in opposite
+directions, while the ResNet18 interval includes zero. The metric effect therefore varies with the
+representation in this protocol, but a representation need not show a clear preference. Frozen
+ImageNet features are a different regime from embeddings trained end-to-end with the
+prototypical-network objective. Rejection is disabled for this closed-set table and requires
+separate unknown classes plus held-out calibration data.
 
 ~~~bash
 pip install -e ".[vision]"
@@ -376,10 +381,15 @@ python benchmarks/evaluate_omniglot.py --download --threads 4
 This is a frozen-encoder system check, not a reproduction of the trained Omniglot result from the
 Prototypical Networks paper. Each episode calls this repository's `fit_support()` and `predict()`
 methods without caching embeddings between metric runs. Expect the full evaluation to take several
-minutes: the published run took 320.0 seconds after downloads on CPU with four intra-op threads.
+minutes: the published three-encoder run took 501.6 seconds after downloads on CPU with four
+intra-op threads.
 It used Python 3.12.13, PyTorch 2.9.1+cpu, torchvision 0.24.1+cpu, and Pillow 12.3.0. The script
 downloads the evaluation split and official torchvision weights on first use, then emits the
 environment, protocol, aggregate results, paired differences, and elapsed time as JSON.
+The `protocol.enumeration` object records whether episode construction used sorted character and
+image paths from torchvision metadata or the dataset-iteration fallback with native ordering, so
+results from the fallback cannot be mistaken for the sorted protocol solely because their seed
+matches.
 
 ## Related approaches
 

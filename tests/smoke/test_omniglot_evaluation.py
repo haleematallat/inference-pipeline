@@ -1,4 +1,6 @@
 import runpy
+import sys
+from types import SimpleNamespace
 
 import torch
 from torch import nn
@@ -7,6 +9,40 @@ from torch import nn
 class FlattenEncoder(nn.Module):
     def forward(self, images):
         return images.flatten(start_dim=1)
+
+
+def test_default_evaluation_includes_three_encoder_representations(monkeypatch) -> None:
+    evaluation = runpy.run_path("benchmarks/evaluate_omniglot.py", run_name="evaluation")
+    monkeypatch.setattr(sys, "argv", ["evaluate_omniglot.py"])
+
+    args = evaluation["parse_args"]()
+
+    assert args.encoders == ["statistical", "mobilenet_v3_small", "resnet18"]
+
+
+def test_protocol_records_episode_enumeration_path() -> None:
+    evaluation = runpy.run_path("benchmarks/evaluate_omniglot.py", run_name="evaluation")
+    build_protocol = evaluation["build_protocol"]
+    args = SimpleNamespace(
+        ways=1,
+        shots=1,
+        queries=1,
+        episodes=1,
+        seed=7,
+    )
+
+    protocol = build_protocol(
+        args,
+        {
+            "source": "dataset_iteration",
+            "ordering": "dataset_native_order",
+        },
+    )
+
+    assert protocol["enumeration"] == {
+        "source": "dataset_iteration",
+        "ordering": "dataset_native_order",
+    }
 
 
 def test_episode_evaluation_uses_fixed_support_and_query_sets() -> None:
@@ -70,7 +106,13 @@ def test_omniglot_index_collection_falls_back_to_dataset_reads() -> None:
         def __getitem__(self, index):
             return self.samples[index]
 
-    assert collect_class_indices(Dataset()) == {0: [0, 2], 1: [1]}
+    indices, enumeration = collect_class_indices(Dataset())
+
+    assert indices == {0: [0, 2], 1: [1]}
+    assert enumeration == {
+        "source": "dataset_iteration",
+        "ordering": "dataset_native_order",
+    }
 
 
 def test_omniglot_index_collection_uses_metadata_without_decoding() -> None:
@@ -89,4 +131,10 @@ def test_omniglot_index_collection_uses_metadata_without_decoding() -> None:
         def __getitem__(self, index):
             raise AssertionError("image should not be decoded")
 
-    assert collect_class_indices(Dataset()) == {0: [3, 1], 1: [2, 0]}
+    indices, enumeration = collect_class_indices(Dataset())
+
+    assert indices == {0: [3, 1], 1: [2, 0]}
+    assert enumeration == {
+        "source": "torchvision_private_metadata",
+        "ordering": "sorted_character_and_image_paths",
+    }
