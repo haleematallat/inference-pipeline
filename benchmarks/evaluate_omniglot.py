@@ -21,18 +21,21 @@ if TYPE_CHECKING:
     from torchvision.datasets import Omniglot
 
 
-def load_dataset(root: str, download: bool) -> tuple[Omniglot, dict[int, list[int]]]:
+def load_dataset(
+    root: str,
+    download: bool,
+) -> tuple[Omniglot, dict[int, list[int]], dict[str, str]]:
     try:
         from torchvision.datasets import Omniglot
     except ImportError as error:
         raise RuntimeError("Omniglot evaluation requires installation with the 'vision' extra") from error
 
     dataset = Omniglot(root=root, background=False, download=download)
-    indices_by_class = collect_class_indices(dataset)
-    return dataset, indices_by_class
+    indices_by_class, enumeration = collect_class_indices(dataset)
+    return dataset, indices_by_class, enumeration
 
 
-def collect_class_indices(dataset: Omniglot) -> dict[int, list[int]]:
+def collect_class_indices(dataset: Omniglot) -> tuple[dict[int, list[int]], dict[str, str]]:
     try:
         characters = dataset._characters
         character_images = dataset._flat_character_images
@@ -41,17 +44,26 @@ def collect_class_indices(dataset: Omniglot) -> dict[int, list[int]]:
         for index in range(len(dataset)):
             _, target = dataset[index]
             indices_by_class.setdefault(int(target), []).append(index)
-        return indices_by_class
+        return indices_by_class, {
+            "source": "dataset_iteration",
+            "ordering": "dataset_native_order",
+        }
 
     images_by_character: dict[str, list[tuple[str, int]]] = {}
     for index, (image_path, target) in enumerate(character_images):
         character_path = characters[target]
         images_by_character.setdefault(character_path, []).append((image_path, index))
 
-    return {
-        class_index: [index for _, index in sorted(images)]
-        for class_index, (_, images) in enumerate(sorted(images_by_character.items()))
-    }
+    return (
+        {
+            class_index: [index for _, index in sorted(images)]
+            for class_index, (_, images) in enumerate(sorted(images_by_character.items()))
+        },
+        {
+            "source": "torchvision_private_metadata",
+            "ordering": "sorted_character_and_image_paths",
+        },
+    )
 
 
 def create_episodes(
@@ -199,12 +211,24 @@ def compare_metrics(cosine: list[float], euclidean: list[float]) -> dict[str, fl
     }
 
 
+def build_protocol(args: argparse.Namespace, enumeration: dict[str, str]) -> dict[str, object]:
+    return {
+        "ways": args.ways,
+        "shots": args.shots,
+        "queries_per_class": args.queries,
+        "episodes": args.episodes,
+        "seed": args.seed,
+        "rejection_threshold": None,
+        "enumeration": enumeration,
+    }
+
+
 def run_evaluation(args: argparse.Namespace) -> dict[str, object]:
     import torchvision
 
     started_at = perf_counter()
     torch.set_num_threads(args.threads)
-    dataset, indices_by_class = load_dataset(args.data_dir, args.download)
+    dataset, indices_by_class, enumeration = load_dataset(args.data_dir, args.download)
     episodes = create_episodes(
         indices_by_class,
         args.ways,
@@ -255,14 +279,7 @@ def run_evaluation(args: argparse.Namespace) -> dict[str, object]:
             "device": args.device,
             "threads": args.threads,
         },
-        "protocol": {
-            "ways": args.ways,
-            "shots": args.shots,
-            "queries_per_class": args.queries,
-            "episodes": args.episodes,
-            "seed": args.seed,
-            "rejection_threshold": None,
-        },
+        "protocol": build_protocol(args, enumeration),
         "results": results,
         "paired_comparisons": comparisons,
         "elapsed_seconds": round(perf_counter() - started_at, 1),
@@ -282,7 +299,7 @@ def parse_args() -> argparse.Namespace:
         "--encoders",
         nargs="+",
         choices=["statistical", "mobilenet_v3_small", "resnet18"],
-        default=["statistical", "mobilenet_v3_small"],
+        default=["statistical", "mobilenet_v3_small", "resnet18"],
     )
     parser.add_argument(
         "--metrics",
